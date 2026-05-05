@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata xml:lang="en"><Esri><CreaDate>20241124</CreaDate><CreaTime>16315200</CreaTime><ArcGISFormat>1.0</ArcGISFormat><SyncOnce>TRUE</SyncOnce><DataProperties><lineage><Process ToolSource="c:\program files\arcgis\pro\Resources\ArcToolbox\toolboxes\Spatial Analyst Tools.tbx\ExtractMultiValuesToPoints" Date="20241124" Time="163152">ExtractMultiValuesToPoints elc_pts_3m "NDVI_2019_3m.tif NDVIortho" BILINEAR</Process></lineage></DataProperties></Esri></metadata>

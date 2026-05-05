@@ -1,0 +1,704 @@
+#
+# Purpose: Fit logistics to each crown, calculate SOS, EOS, MaxVeg (Elmore, bootstrapped version)
+#
+# Adapted for DC phenology project
+#
+
+library(ggplot2)
+library(data.table)
+library(doSNOW)
+library(psych)
+library(matrixStats)
+library(minpack.lm)
+library(quantreg)
+library(sf)
+library(dplyr)
+library(caTools)
+
+# 1 Setup ------------------------------------------------------------
+# * 1.1 User inputs ---------------------------------------------------
+
+# Output directory
+output_dir <- "C:/Users/valea/OneDrive/Documents/dc_pheno_outputs"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+setwd(output_dir)
+wd <- getwd()
+
+# Output file name
+user_output_filename <- "dc_pheno_metrics_2020_test.csv"
+
+# Set which year you're running
+user_year <- 2018
+
+# Winter shoulder dates for that run
+start_date <- 20171211
+end_date <- 20190305
+
+# Performance
+NumberOfCluster <- 20
+
+# Bootstrapping
+boot_iterations <- 50
+
+# Subset fraction for testing
+run_proportion <- 0.002
+
+# Sensor / image settings
+user_sensor <- "pss4"
+image_type <- "surface_reflectance"
+
+# These quality thresholds are mostly not used for your DC SR workflow,
+# but keep them defined so the script does not break.
+user_r_red <- 0.80
+user_mad_red <- 400
+
+quant_filt <- TRUE
+df <- 10
+
+# Optional shapefile join
+do_join <- "no"
+shapefile_filename <- NA
+shp_merge_filename <- NA
+
+# Optional fit_stats workflow
+use_fit_stats <- FALSE
+
+
+# * * 1.1.2 NOT often updated ----------------------------------------
+
+# Sensor / image type
+user_sensor <- "pss4"
+image_type <- "surface_reflectance"
+
+# Quality/filter settings
+# These are mostly placeholders for your DC SR workflow, since your current
+# dataset does not appear to use corr_red / mad_red filtering in practice.
+user_r_red <- 0.80
+user_mad_red <- 400
+quant_filt <- TRUE
+df <- 10
+
+# Join the output csv back to a shapefile?
+# Leave as "no" for now.
+do_join <- "no"
+shapefile_filename <- NA
+shp_merge_filename <- NA
+
+# Optional fit_stats workflow
+use_fit_stats <- FALSE
+# fit_stats_filename <- NA
+# fit_stats_helper_path <- NA
+
+
+# * 1.2 Helper functions ---------------------------------------------
+
+# Small helper functions (kept minimal to preserve line-by-line workflow).
+
+# Apply winter shoulders by shifting DOY for prior/next year around the target year(s).
+# This allows an arbitrary set of years without repeated if/then blocks.
+winter_shoulders_years <- user_year
+
+apply_winter_shoulders <- function(tree_dat, years_vec) {
+  if (length(years_vec) == 0) {
+    return(tree_dat)
+  }
+  
+  years_vec <- unique(as.integer(years_vec))
+  
+  for (y in years_vec) {
+    if (is.na(y)) next
+    
+    prev_year <- y - 1
+    next_year <- y + 1
+    
+    # im_date is yyyymmdd
+    prev_idx <- which(tree_dat$im_date < as.integer(paste0(y, "0000")))
+    next_idx <- which(tree_dat$im_date > as.integer(paste0(next_year, "0000")))
+    
+    if (length(prev_idx) > 0) {
+      tree_dat$im_doy[prev_idx] <- tree_dat$im_doy[prev_idx] - 365
+    }
+    
+    if (length(next_idx) > 0) {
+      tree_dat$im_doy[next_idx] <- tree_dat$im_doy[next_idx] + 365
+    }
+  }
+  
+  return(tree_dat)
+}
+
+# Compute MuSLI-style percentile DOYs from a spline fit.
+calc_spline_metrics <- function(sm_spline) {
+  maxNDVI <- max(sm_spline$y, na.rm = TRUE)
+  max_green_doy_idx <- which.min(abs(sm_spline$y - maxNDVI))
+  max_green_doy <- sm_spline$x[max_green_doy_idx]
+  
+  df_greenup_idx <- which(sm_spline$x < max_green_doy)
+  minNDVI <- min(sm_spline$y[df_greenup_idx], na.rm = TRUE)
+  
+  greenup_15 <- (maxNDVI - minNDVI) * 0.15 + minNDVI
+  greenup_50 <- (maxNDVI - minNDVI) * 0.50 + minNDVI
+  greenup_90 <- (maxNDVI - minNDVI) * 0.90 + minNDVI
+  
+  minNDVI_DOY_idx <- which(sm_spline$y == minNDVI)
+  minNDVI_DOY <- sm_spline$x[minNDVI_DOY_idx]
+  df_greenup_idx <- which(sm_spline$x < max_green_doy & sm_spline$x > minNDVI_DOY)
+  
+  g15 <- approx(x = sm_spline$y[df_greenup_idx], y = sm_spline$x[df_greenup_idx], xout = greenup_15)$y
+  g50 <- approx(x = sm_spline$y[df_greenup_idx], y = sm_spline$x[df_greenup_idx], xout = greenup_50)$y
+  g90 <- approx(x = sm_spline$y[df_greenup_idx], y = sm_spline$x[df_greenup_idx], xout = greenup_90)$y
+  
+  df_browndown_idx <- which(sm_spline$x >= max_green_doy)
+  minNDVI_bd <- min(sm_spline$y[df_browndown_idx], na.rm = TRUE)
+  
+  brown_10 <- (maxNDVI - minNDVI_bd) * 0.90 + minNDVI_bd
+  brown_50 <- (maxNDVI - minNDVI_bd) * 0.50 + minNDVI_bd
+  brown_85 <- (maxNDVI - minNDVI_bd) * 0.15 + minNDVI_bd
+  
+  b10 <- approx(x = sm_spline$y[df_browndown_idx], y = sm_spline$x[df_browndown_idx], xout = brown_10)$y
+  b50 <- approx(x = sm_spline$y[df_browndown_idx], y = sm_spline$x[df_browndown_idx], xout = brown_50)$y
+  b85 <- approx(x = sm_spline$y[df_browndown_idx], y = sm_spline$x[df_browndown_idx], xout = brown_85)$y
+  
+  return(list(
+    maxNDVI = maxNDVI,
+    minNDVI_pregreen = minNDVI,
+    g15 = g15,
+    g50 = g50,
+    g90 = g90,
+    b10 = b10,
+    b50 = b50,
+    b85 = b85
+  ))
+}
+
+
+
+# 2 Data prep ---------------------------------------------------------
+# * 2.1 Load inputs ---------------------------------------------------
+
+# Use the merged DC dataset already loaded in memory
+dc_dat <- dc_data
+
+# Make sure required columns exist
+required_cols <- c("UID", "SpCode", "ndvi", "im_date", "im_doy", "year")
+missing_cols <- setdiff(required_cols, names(dc_dat))
+
+if (length(missing_cols) > 0) {
+  stop(paste("dc_dat is missing required columns:", paste(missing_cols, collapse = ", ")))
+}
+
+print(head(dc_dat))
+print(dim(dc_dat))
+
+# * 2.2 Optional fit_stats workflow ----------------------------------
+if (use_fit_stats) {
+  if (!exists("fit_stats_filename")) {
+    stop("use_fit_stats is TRUE but fit_stats_filename is not defined.")
+  }
+  if (!exists("fit_stats_helper_path")) {
+    stop("use_fit_stats is TRUE but fit_stats_helper_path is not defined.")
+  }
+  
+  source(fit_stats_helper_path)
+  fit_stats_summary <- load_fit_stats_summary(fit_stats_filename)
+  ggplot(fit_stats_summary, aes(mad_red)) + geom_histogram()
+  
+  dc_dat <- merge(dc_dat, fit_stats_summary, by.x = "im_datetime", by.y = "folder")
+}
+
+# 3 Parallel loop -----------------------------------------------------
+# * 3.1 Cluster and bookkeeping --------------------------------------
+
+# Loop through all unique crowns
+uid_unique <- unique(dc_dat$UID)
+uid_unique <- uid_unique[!is.na(uid_unique)]
+
+# Optional: randomize order so the test subset is not just the first trees
+set.seed(123)
+uid_unique <- sample(uid_unique)
+
+# Start cluster
+# Route worker output away from the interactive console to avoid PSOCK stalls.
+cl <- makeCluster(NumberOfCluster, outfile = "NUL")
+registerDoSNOW(cl)
+
+iterations <- length(uid_unique)
+start_time <- Sys.time()
+
+# Error vector
+err_vec <- rep(NA, iterations)
+
+# Subset iterations based on run_proportion
+iter_n <- max(1L, min(iterations, as.integer(round(iterations * run_proportion))))
+iter_subset <- seq_len(iter_n)
+
+# Set the appropriate model for downstream plotting
+# (not used for actual fitting)
+v <- function(m, t) {
+  m[1] + (m[2] - m[7] * t) *
+    ((1 / (1 + exp((m[3] - t) / m[4]))) - (1 / (1 + exp((m[5] - t) / m[6]))))
+}
+
+cat("Total unique UIDs:", iterations, "\n")
+cat("UIDs being run:", iter_n, "\n")
+
+
+# * 3.2 Per-crown loop (parallel) -------------------------------------
+# Loop (in parallel) through all tree crowns
+# iter_subset defined above and could be all crowns
+results_list <- foreach(
+  i = iter_subset,
+  .packages = c("ggplot2", "data.table", "psych", "matrixStats",
+                "minpack.lm", "quantreg", "splines", "dplyr", "caTools")
+) %dopar% {
+  
+  # start trycatch. Nested result. Must return to result_tc and then return that to foreach
+  result_tc <- tryCatch(
+    expr = {
+      
+      # make function available in the loop in case that's important to parallel worker scope
+      v <- function(m, t) {
+        m[1] + (m[2] - m[7] * t) *
+          ((1 / (1 + exp((m[3] - t) / m[4]))) - (1 / (1 + exp((m[5] - t) / m[6]))))
+      }
+      
+      # get UID for the crown in question
+      user_uid <- uid_unique[i]
+      
+      # DC-safe subsetting
+      if (!is.na(user_year)) {
+        idx_uid_starter <- which(
+          dc_dat$UID == user_uid &
+            dc_dat$im_date > start_date &
+            dc_dat$im_date < end_date
+        )
+      } else {
+        idx_uid_starter <- which(dc_dat$UID == user_uid)
+      }
+      
+      # reduce dataset to an individual tree and exclude NA ndvi
+      tree_dat <- dc_dat[idx_uid_starter, ]
+      tree_dat <- tree_dat[!is.na(tree_dat$ndvi), ]
+      
+      if (nrow(tree_dat) < 8) {
+        stop("Too few observations after initial filtering")
+      }
+      
+      # multiply ndvi by 10000 for parameter interpretation and to align with Elmore's code
+      tree_dat$ndvi <- as.integer(tree_dat$ndvi * 10000)
+      
+      # if there are date dupes, keep the record with highest absolute NDVI
+      tree_dat <- tree_dat[order(tree_dat$im_date, -abs(tree_dat$ndvi)), ]
+      dup_bin <- duplicated(tree_dat$im_date)
+      tree_dat <- tree_dat[!dup_bin, ]
+      
+      if (nrow(tree_dat) < 8) {
+        stop("Too few unique observation dates after deduplication")
+      }
+      
+      # winter shoulder
+      tree_dat <- apply_winter_shoulders(tree_dat, winter_shoulders_years)
+      
+      # shorter variable names for easy use with nls
+      tree_dat_sort <- tree_dat[order(tree_dat$im_doy), ]
+      y0 <- tree_dat_sort$ndvi
+      x0 <- tree_dat_sort$im_doy
+      year0 <- tree_dat_sort$year
+      
+      # record the initial number of dates used
+      image_dates_initial <- length(x0)
+      
+      # do the quantile filtering if requested
+      if (quant_filt == TRUE) {
+        y0 <- runquantile(y0, k = 3, probs = 0.75, endrule = "quantile")
+      }
+      
+      # filter initially based on spline fit
+      x0_dith <- dither(x0)
+      sm_spline <- smooth.spline(x0_dith, y0, cv = FALSE, df = df)
+      fit_resids <- sm_spline$y - y0
+      
+      # use residuals to find and remove outliers
+      outliers <- boxplot(fit_resids, plot = FALSE)$out
+      inliers <- setdiff(fit_resids, outliers)
+      inliers_idx <- which(fit_resids %in% inliers)
+      
+      x0 <- x0[inliers_idx]
+      y0 <- y0[inliers_idx]
+      year0 <- year0[inliers_idx]
+      
+      if (length(x0) < 8) {
+        stop("Too few observations after spline outlier filtering")
+      }
+      
+      # run spline again for better metrics
+      x0_dith <- dither(x0)
+      sm_spline <- smooth.spline(x0_dith, y0, cv = FALSE, df = df)
+      fit_resids <- sm_spline$y - y0
+      
+      # spl metrics interlude --------------------------------------------
+      
+      # try to approximate MuSLI outputs (15%, 50%, 90%)
+      spl_metrics_op <- calc_spline_metrics(sm_spline)
+      maxNDVI <- spl_metrics_op$maxNDVI
+      minNDVI_pregreen <- spl_metrics_op$minNDVI_pregreen
+      g15_spl_op <- spl_metrics_op$g15
+      g50_spl_op <- spl_metrics_op$g50
+      g90_spl_op <- spl_metrics_op$g90
+      b10_spl_op <- spl_metrics_op$b10
+      b50_spl_op <- spl_metrics_op$b50
+      b85_spl_op <- spl_metrics_op$b85
+      
+      # initial parameter guesses
+      m1_idx <- which(x0 < 90 | x0 > 330)
+      m1 <- quantile(y0[m1_idx], 0.50)
+      m2 <- (quantile(y0, 0.99) - m1)
+      m3 <- 110
+      m4 <- 10
+      m5 <- 310
+      m6 <- 10
+      m7 <- 4
+      
+      # assemble parameter set
+      m <- c(m1, m2, m3, m4, m5, m6, m7)
+      
+      # run to get residuals and thus weights
+      mnew1 <- nlsLM(
+        y0 ~ a + (b - g * x0) * ((1 / (1 + exp((c - x0) / d))) - (1 / (1 + exp((e - x0) / f)))),
+        start = list(a = m[1], b = m[2], c = m[3], d = m[4], e = m[5], f = m[6], g = m[7])
+      )
+      mnew1_params <- mnew1$m$getPars()
+      
+      # the weights are just the inverse absolute residuals
+      w0 <- max(abs(residuals(mnew1)))^2 - abs(residuals(mnew1))^2
+      
+      # add the weights to the nls function
+      mnew2 <- nlsLM(
+        y0 ~ a + (b - g * x0) * ((1 / (1 + exp((c - x0) / d))) - (1 / (1 + exp((e - x0) / f)))),
+        start = list(
+          a = mnew1_params[1], b = mnew1_params[2], c = mnew1_params[3], d = mnew1_params[4],
+          e = mnew1_params[5], f = mnew1_params[6], g = mnew1_params[7]
+        ),
+        weights = w0
+      )
+      mnew2_params <- mnew2$m$getPars()
+      
+      # filter again
+      mnew2_resids <- abs(residuals(mnew2))
+      outliers <- boxplot(mnew2_resids, plot = FALSE)$out
+      inliers <- setdiff(mnew2_resids, outliers)
+      inliers_idx <- which(mnew2_resids %in% inliers)
+      
+      # redo fit after removing outliers
+      x0 <- x0[inliers_idx]
+      y0 <- y0[inliers_idx]
+      w0 <- w0[inliers_idx]
+      
+      if (length(x0) < 8) {
+        stop("Too few observations after logistic outlier filtering")
+      }
+      
+      mnew3 <- nlsLM(
+        y0 ~ a + (b - g * x0) * ((1 / (1 + exp((c - x0) / d))) - (1 / (1 + exp((e - x0) / f)))),
+        start = list(
+          a = mnew2_params[1], b = mnew2_params[2], c = mnew2_params[3], d = mnew2_params[4],
+          e = mnew2_params[5], f = mnew2_params[6], g = mnew2_params[7]
+        ),
+        weights = w0
+      )
+      mnew3_params <- mnew3$m$getPars()
+      
+      # image dates after all filtering
+      image_dates_final <- length(x0)
+      
+      # Loop through boot_iterations
+      df_params <- data.frame()
+      pred_mat_365 <- matrix(data = NA, nrow = 365, ncol = boot_iterations)
+      pred_mat_spl_365 <- matrix(data = NA, nrow = 365, ncol = boot_iterations)
+      
+      for (j in seq_len(boot_iterations)) {
+        
+        y <- y0
+        x <- x0
+        w <- w0
+        
+        # bootstrap resampling with replacement
+        boot_idx <- sample(seq(1, length(x)), replace = TRUE)
+        x <- x[boot_idx]
+        y <- y[boot_idx]
+        w <- w[boot_idx]
+        
+        try({
+          
+          # spl stuff --------------------------------------------
+          x_dith <- dither(x)
+          sm_spline <- smooth.spline(x_dith, y, cv = FALSE, df = df)
+          
+          spl_metrics <- calc_spline_metrics(sm_spline)
+          g15_spl <- spl_metrics$g15
+          g50_spl <- spl_metrics$g50
+          g90_spl <- spl_metrics$g90
+          b10_spl <- spl_metrics$b10
+          b50_spl <- spl_metrics$b50
+          b85_spl <- spl_metrics$b85
+          
+          # DL fit stuff ------------------------------------------------------------------------------
+          mnew <- nlsLM(
+            y ~ a + (b - g * x) * ((1 / (1 + exp((c - x) / d))) - (1 / (1 + exp((e - x) / f)))),
+            start = list(
+              a = mnew3_params[1], b = mnew3_params[2], c = mnew3_params[3], d = mnew3_params[4],
+              e = mnew3_params[5], f = mnew3_params[6], g = mnew3_params[7]
+            ),
+            weights = w
+          )
+          
+          # calculate concavity based on 2nd derivative of interpolated function
+          x_interp <- seq(min(x), max(x), 0.1)
+          ndvi_interp <- v(mnew$m$getPars(), x_interp)
+          ndvi_curve <- diff(diff(ndvi_interp))
+          ndvi_curve_pad <- c(0, ndvi_curve, 0)
+          
+          # early season curvature
+          early_season_idx <- which(x_interp < 180)
+          sos_concavity_idx <- which(ndvi_curve == max(ndvi_curve[early_season_idx], na.rm = TRUE))
+          sos_concavity_doy <- x_interp[sos_concavity_idx]
+          sos_convexity_idx <- which(ndvi_curve == min(ndvi_curve[early_season_idx], na.rm = TRUE))
+          sos_convexity_doy <- x_interp[sos_convexity_idx]
+          
+          # late season curvature
+          late_season_idx <- which(x_interp > 180)
+          eos_concavity_idx <- which(ndvi_curve == max(ndvi_curve[late_season_idx], na.rm = TRUE))
+          eos_concavity_doy <- x_interp[eos_concavity_idx]
+          eos_convexity_idx <- which(ndvi_curve == min(ndvi_curve[late_season_idx], na.rm = TRUE))
+          eos_convexity_doy <- x_interp[eos_convexity_idx]
+          
+          # store parameter estimates -----------------------------------------------------------
+          params <- mnew$m$getPars()
+          df_params_this_iter <- data.frame(
+            "m1" = params[[1]], "m2" = params[[2]], "m3" = params[[3]], "m4" = params[[4]],
+            "m5" = params[[5]], "m6" = params[[6]], "m7" = params[[7]], sos_concavity_doy,
+            sos_convexity_doy, eos_convexity_doy, eos_concavity_doy, g15_spl, g50_spl, g90_spl,
+            b10_spl, b50_spl, b85_spl
+          )
+          df_params <- rbind(df_params, df_params_this_iter)
+          
+          # predict using doy 1 to doy 365
+          new_x0 <- seq(1, 365)
+          pred_mat_365[, j] <- v(as.numeric(df_params_this_iter[1, 1:7]), new_x0)
+          pred_mat_spl_365[, j] <- predict(sm_spline, new_x0)$y
+          
+        }, silent = TRUE)
+        
+      } # end bootstrap loop
+      
+      if (nrow(df_params) == 0) {
+        stop("No successful bootstrap iterations")
+      }
+      
+      # summary of all parameters for this crown
+      param_summary <- describe(df_params)
+      m_med <- param_summary$median
+      ndvi_pred <- v(m_med[1:7], x0)
+      boot_n <- param_summary$n[1]
+      
+      pred_med <- rowMedians(pred_mat_365, na.rm = TRUE)
+      ndvi_pred_p97_5_365 <- rowQuantiles(pred_mat_365, probs = 0.975, na.rm = TRUE)
+      ndvi_pred_p2_5_365 <- rowQuantiles(pred_mat_365, probs = 0.025, na.rm = TRUE)
+      df_fit_365 <- data.frame(
+        "doy_365" = new_x0, "pred_med" = pred_med, "pred_high" = ndvi_pred_p97_5_365,
+        "pred_low" = ndvi_pred_p2_5_365
+      )
+      
+      # evaluate mnew3 at 365 days
+      x_365 <- seq(1, 365)
+      mnew3_fitted_pts <- data.frame("doy_365" = x_365, "ndvi" = v(mnew3_params, x_365))
+      green_up_pts <- mnew3_fitted_pts %>% filter(doy_365 < 180)
+      minNDVI <- min(green_up_pts$ndvi)
+      maxNDVI <- max(green_up_pts$ndvi)
+      greenup_15 <- (maxNDVI - minNDVI) * 0.15 + minNDVI
+      greenup_50 <- (maxNDVI - minNDVI) * 0.5 + minNDVI
+      greenup_90 <- (maxNDVI - minNDVI) * 0.9 + minNDVI
+      g15_dl <- approx(x = green_up_pts$ndvi, y = green_up_pts$doy_365, xout = greenup_15)$y
+      g50_dl <- approx(x = green_up_pts$ndvi, y = green_up_pts$doy_365, xout = greenup_50)$y
+      g90_dl <- approx(x = green_up_pts$ndvi, y = green_up_pts$doy_365, xout = greenup_90)$y
+      
+      brown_down_pts <- mnew3_fitted_pts %>% filter(doy_365 >= 180)
+      minNDVI <- min(brown_down_pts$ndvi)
+      maxNDVI <- max(brown_down_pts$ndvi)
+      brown_10 <- (maxNDVI - minNDVI) * 0.9 + minNDVI
+      brown_50 <- (maxNDVI - minNDVI) * 0.5 + minNDVI
+      brown_85 <- (maxNDVI - minNDVI) * 0.15 + minNDVI
+      b10_dl <- approx(x = brown_down_pts$ndvi, y = brown_down_pts$doy_365, xout = brown_10)$y
+      b50_dl <- approx(x = brown_down_pts$ndvi, y = brown_down_pts$doy_365, xout = brown_50)$y
+      b85_dl <- approx(x = brown_down_pts$ndvi, y = brown_down_pts$doy_365, xout = brown_85)$y
+      
+      # estimate area under the curve
+      auc_dl <- sum(mnew3_fitted_pts$ndvi) / nrow(mnew3_fitted_pts)
+      auc_spl <- sum(sm_spline$y) / length(sm_spline$y)
+      
+      pred_med_spl <- rowMedians(pred_mat_spl_365, na.rm = TRUE)
+      ndvi_pred_spl_p97_5_365 <- rowQuantiles(pred_mat_spl_365, probs = 0.975, na.rm = TRUE)
+      ndvi_pred_spl_p2_5_365 <- rowQuantiles(pred_mat_spl_365, probs = 0.025, na.rm = TRUE)
+      df_fit_spl_365 <- data.frame(
+        "doy_365" = new_x0, "pred_med_spl" = pred_med_spl,
+        "pred_spl_high" = ndvi_pred_spl_p97_5_365,
+        "pred_spl_low" = ndvi_pred_spl_p2_5_365
+      )
+      
+      # only save plots if there is a bootstrapped fit
+      if (boot_iterations > 2) {
+        ylim <- c(quantile(y0, 0.02), quantile(y0, 0.99))
+        ggplot() +
+          geom_line(data = df_fit_365, aes(x = doy_365, y = pred_med), color = "black") +
+          geom_ribbon(
+            data = df_fit_365,
+            aes(x = doy_365, y = pred_med, ymin = pred_low, ymax = pred_high, alpha = 0.3),
+            show.legend = FALSE
+          ) +
+          geom_point(data = tree_dat, aes(x = im_doy, y = ndvi), color = "blue") +
+          theme_minimal() +
+          ylim(ylim)
+        
+        if (!dir.exists("./plot_jpgs/")) {
+          dir.create("./plot_jpgs/")
+        }
+        
+        ggsave(
+          paste("./plot_jpgs/crown_", user_uid, "_", unique(tree_dat$SpCode), "_logistic", ".jpg", sep = ""),
+          width = 5, height = 3, plot = last_plot(), units = "in"
+        )
+      }
+      
+      # gather all parameters for output into a data frame
+      m1 <- param_summary$median[1]; m2 <- param_summary$median[2]
+      m3 <- param_summary$median[3]; m4 <- param_summary$median[4]
+      m5 <- param_summary$median[5]; m6 <- param_summary$median[6]
+      m7 <- param_summary$median[7]
+      sos_early <- param_summary$median[8]
+      summer_shoulder <- param_summary$median[9]
+      aut_shoulder <- param_summary$median[10]
+      eos_late <- param_summary$median[11]
+      g15_spl <- param_summary$median[12]; g50_spl <- param_summary$median[13]; g90_spl <- param_summary$median[14]
+      b10_spl <- param_summary$median[15]; b50_spl <- param_summary$median[16]; b85_spl <- param_summary$median[17]
+      
+      # parameter standard errors
+      m1_se <- param_summary$se[1]; m2_se <- param_summary$se[2]
+      m3_se <- param_summary$se[3]; m4_se <- param_summary$se[4]
+      m5_se <- param_summary$se[5]; m6_se <- param_summary$se[6]
+      m7_se <- param_summary$se[7]
+      sos_early_se <- param_summary$se[8]
+      summer_shoulder_se <- param_summary$se[9]
+      aut_shoulder_se <- param_summary$se[10]
+      eos_late_se <- param_summary$se[11]
+      
+      # high and low quantiles
+      m1_025 <- quantile(df_params$m1, probs = 0.025, na.rm = TRUE); m1_975 <- quantile(df_params$m1, probs = 0.975, na.rm = TRUE)
+      m2_025 <- quantile(df_params$m2, probs = 0.025, na.rm = TRUE); m2_975 <- quantile(df_params$m2, probs = 0.975, na.rm = TRUE)
+      m3_025 <- quantile(df_params$m3, probs = 0.025, na.rm = TRUE); m3_975 <- quantile(df_params$m3, probs = 0.975, na.rm = TRUE)
+      m4_025 <- quantile(df_params$m4, probs = 0.025, na.rm = TRUE); m4_975 <- quantile(df_params$m4, probs = 0.975, na.rm = TRUE)
+      m5_025 <- quantile(df_params$m5, probs = 0.025, na.rm = TRUE); m5_975 <- quantile(df_params$m5, probs = 0.975, na.rm = TRUE)
+      m6_025 <- quantile(df_params$m6, probs = 0.025, na.rm = TRUE); m6_975 <- quantile(df_params$m6, probs = 0.975, na.rm = TRUE)
+      m7_025 <- quantile(df_params$m7, probs = 0.025, na.rm = TRUE); m7_975 <- quantile(df_params$m7, probs = 0.975, na.rm = TRUE)
+      sos_early_025 <- quantile(df_params$sos_concavity_doy, probs = 0.025, na.rm = TRUE); sos_early_975 <- quantile(df_params$sos_concavity_doy, probs = 0.975, na.rm = TRUE)
+      summer_shoulder_025 <- quantile(df_params$sos_convexity_doy, probs = 0.025, na.rm = TRUE); summer_shoulder_975 <- quantile(df_params$sos_convexity_doy, probs = 0.975, na.rm = TRUE)
+      aut_shoulder_025 <- quantile(df_params$eos_convexity_doy, probs = 0.025, na.rm = TRUE); aut_shoulder_975 <- quantile(df_params$eos_convexity_doy, probs = 0.975, na.rm = TRUE)
+      eos_late_025 <- quantile(df_params$eos_concavity_doy, probs = 0.025, na.rm = TRUE); eos_late_975 <- quantile(df_params$eos_concavity_doy, probs = 0.975, na.rm = TRUE)
+      g15_spl_025 <- quantile(df_params$g15_spl, probs = 0.025, na.rm = TRUE); g15_spl_975 <- quantile(df_params$g15_spl, probs = 0.975, na.rm = TRUE)
+      g50_spl_025 <- quantile(df_params$g50_spl, probs = 0.025, na.rm = TRUE); g50_spl_975 <- quantile(df_params$g50_spl, probs = 0.975, na.rm = TRUE)
+      g90_spl_025 <- quantile(df_params$g90_spl, probs = 0.025, na.rm = TRUE); g90_spl_975 <- quantile(df_params$g90_spl, probs = 0.975, na.rm = TRUE)
+      b10_spl_025 <- quantile(df_params$b10_spl, probs = 0.025, na.rm = TRUE); b10_spl_975 <- quantile(df_params$b10_spl, probs = 0.975, na.rm = TRUE)
+      b50_spl_025 <- quantile(df_params$b50_spl, probs = 0.025, na.rm = TRUE); b50_spl_975 <- quantile(df_params$b50_spl, probs = 0.975, na.rm = TRUE)
+      b85_spl_025 <- quantile(df_params$b85_spl, probs = 0.025, na.rm = TRUE); b85_spl_975 <- quantile(df_params$b85_spl, probs = 0.975, na.rm = TRUE)
+      
+      # generate basic fit statistics
+      rmse_skysat <- NA
+      rmse_pss4 <- NA
+      
+      dl_fit <- v(mnew3_params, x0)
+      dl_fit_resids <- dl_fit - y0
+      rmse_dl <- sqrt(mean(dl_fit_resids^2, na.rm = TRUE))
+      mad_dl <- median(abs(ndvi_pred - y0), na.rm = TRUE)
+      
+      rmse_spl <- sqrt(mean(fit_resids^2, na.rm = TRUE))
+      mad_spl <- median(abs(fit_resids), na.rm = TRUE)
+      
+      # throw all the important stuff for output into a data frame
+      df_this_crown <- data.frame(
+        user_uid, unique(tree_dat$SpCode),
+        m1, m2, m3, m4, m5, m6, m7, sos_early, summer_shoulder, aut_shoulder, eos_late,
+        m1_025, m1_975, m2_025, m2_975, m3_025, m3_975, m4_025, m4_975, m5_025, m5_975,
+        m6_025, m6_975, m7_025, m7_975, sos_early_025, sos_early_975, summer_shoulder_025,
+        summer_shoulder_975, aut_shoulder_025, aut_shoulder_975, eos_late_025, eos_late_975,
+        m1_se, m2_se, m3_se, m4_se, m5_se, m6_se, m7_se, sos_early_se, summer_shoulder_se, aut_shoulder_se,
+        eos_late_se, boot_n, rmse_dl, mad_dl, rmse_skysat, rmse_pss4, minNDVI_pregreen, maxNDVI, g15_spl, g50_spl, g90_spl, b10_spl, b50_spl, b85_spl, g15_spl_025, g15_spl_975, g50_spl_025, g50_spl_975,
+        g90_spl_025, g90_spl_975, b10_spl_025, b10_spl_975, b50_spl_025, b50_spl_975, b85_spl_025, b85_spl_975,
+        g15_dl, g50_dl, g90_dl, b10_dl, b50_dl, b85_dl, auc_dl, auc_spl,
+        mnew3_params[1], mnew3_params[2], mnew3_params[3], mnew3_params[4], mnew3_params[5], mnew3_params[6],
+        mnew3_params[7],
+        g15_spl_op, g50_spl_op, g90_spl_op, b10_spl_op, b50_spl_op, b85_spl_op, rmse_spl, mad_spl, image_dates_initial, image_dates_final
+      )
+      
+      names(df_this_crown) <- c(
+        "UID", "SpCode", "m1", "m2", "m3", "m4",
+        "m5", "m6", "m7", "sos_early", "summer_shoulder", "aut_shoulder",
+        "eos_late", "m1_025", "m1_975", "m2_025", "m2_975", "m3_025", "m3_975", "m4_025", "m4_975", "m5_025", "m5_975",
+        "m6_025", "m6_975", "m7_025", "m7_975", "sos_early_025", "sos_early_975", "summer_shoulder_025",
+        "summer_shoulder_975", "aut_shoulder_025", "aut_shoulder_975", "eos_late_025", "eos_late_975", "m1_se", "m2_se", "m3_se", "m4_se", "m5_se", "m6_se",
+        "m7_se", "sos_early_se", "summer_shoulder_se", "aut_shoulder_se",
+        "eos_late_se", "boot_n", "rmse_dl", "mad_dl", "rmse_skysat", "rmse_pss4", "minNDVI_pregreen", "maxNDVI",
+        "g15_spl", "g50_spl", "g90_spl", "b10_spl", "b50_spl", "b85_spl", "g15_spl_025", "g15_spl_975", "g50_spl_025", "g50_spl_975",
+        "g90_spl_025", "g90_spl_975", "b10_spl_025", "b10_spl_975", "b50_spl_025", "b50_spl_975", "b85_spl_025", "b85_spl_975",
+        "g15_dl", "g50_dl", "g90_dl", "b10_dl", "b50_dl", "b85_dl", "auc_dl", "auc_spl",
+        "m1_op", "m2_op", "m3_op", "m4_op", "m5_op", "m6_op", "m7_op", "g15_spl_op", "g50_spl_op", "g90_spl_op", "b10_spl_op",
+        "b50_spl_op", "b85_spl_op", "rmse_spl", "mad_spl", "imCountInit", "imCountFinal"
+      )
+      
+      df_this_crown <- df_this_crown
+      
+    },
+    
+    error = function(e) {
+      message("Caught an error!")
+      print(paste("bad uid is ", user_uid, sep = ""))
+      
+      df_this_crown <- data.frame(
+        "UID" = user_uid, "SpCode" = NA, "m1" = NA,
+        "m2" = NA, "m3" = NA, "m4" = NA,
+        "m5" = NA, "m6" = NA, "m7" = NA, "sos_early" = NA, "summer_shoulder" = NA, "aut_shoulder" = NA,
+        "eos_late" = NA, "m1_025" = NA, "m1_975" = NA, "m2_025" = NA, "m2_975" = NA, "m3_025" = NA, "m3_975" = NA, "m4_025" = NA, "m4_975" = NA, "m5_025" = NA, "m5_975" = NA,
+        "m6_025" = NA, "m6_975" = NA, "m7_025" = NA, "m7_975" = NA, "sos_early_025" = NA, "sos_early_975" = NA, "summer_shoulder_025" = NA,
+        "summer_shoulder_975" = NA, "aut_shoulder_025" = NA, "aut_shoulder_975" = NA, "eos_late_025" = NA, "eos_late_975" = NA, "m1_se" = NA, "m2_se" = NA,
+        "m3_se" = NA, "m4_se" = NA, "m5_se" = NA, "m6_se" = NA, "m7_se" = NA,
+        "sos_early_se" = NA, "summer_shoulder_se" = NA, "aut_shoulder_se" = NA,
+        "eos_late_se" = NA, "boot_n" = NA, "rmse_dl" = NA, "mad_dl" = NA,
+        "rmse_skysat" = NA, "rmse_pss4" = NA, "minNDVI_pregreen" = NA, "maxNDVI" = NA, "g15_spl" = NA, "g50_spl" = NA, "g90_spl" = NA, "b10_spl" = NA, "b50_spl" = NA, "b85_spl" = NA, "g15_spl_025" = NA,
+        "g15_spl_975" = NA, "g50_spl_025" = NA, "g50_spl_975" = NA, "g90_spl_025" = NA, "g90_spl_975" = NA, "b10_spl_025" = NA, "b10_spl_975" = NA, "b50_spl_025" = NA,
+        "b50_spl_975" = NA, "b85_spl_025" = NA, "b85_spl_975" = NA,
+        "g15_dl" = NA, "g50_dl" = NA, "g90_dl" = NA, "b10_dl" = NA, "b50_dl" = NA, "b85_dl" = NA, "auc_dl" = NA, "auc_spl" = NA,
+        "m1_op" = NA, "m2_op" = NA, "m3_op" = NA, "m4_op" = NA,
+        "m5_op" = NA, "m6_op" = NA, "m7_op" = NA, "g15_spl_op" = NA, "g50_spl_op" = NA, "g90_spl_op" = NA, "b10_spl_op" = NA,
+        "b50_spl_op" = NA, "b85_spl_op" = NA, "rmse_spl" = NA, "mad_spl" = NA, "imCountInit" = NA, "imCountFinal" = NA
+      )
+      
+      return(df_this_crown)
+    },
+    finally = {
+      # end of try-catch
+    }
+  )
+  
+  return(result_tc)
+}
+
+df_results <- rbindlist(results_list, use.names = TRUE, fill = TRUE)
+
+dim(df_results)
+head(df_results)
+View(df_results)
+
+#### Save Metrics to Excel 
+
+library(writexl)
+
+write_xlsx(df_results, "dc_species_counts_2018.xlsx")
+

@@ -1,0 +1,174 @@
+#ArcGis Data
+
+library(readxl)
+
+arc_dc_trees <- read_excel("dc_trees.xlsx")
+str(arc_dc_trees)
+head(arc_dc_trees)
+
+# Pull Species Data
+
+library(dplyr)
+
+dc_species_counts <- arc_dc_trees %>%
+  group_by(SpCode) %>%
+  summarise(total_obs = n()) %>%
+  arrange(desc(total_obs))
+
+species_lookup <- arc_dc_trees %>%
+  select(SpCode, SCI_NM) %>%
+  distinct()
+
+dc_species_counts_with_scinames <- dc_species_counts %>%
+  left_join(species_lookup, by = "SpCode")
+
+dc_species_counts
+
+dc_species_counts_with_scinames
+
+## Top 20
+top20 <- dc_species_counts %>%
+  slice_max(total_obs, n = 20)
+
+
+## QC Plot
+
+
+library(ggplot2)
+
+ggplot(top20, aes(x = reorder(SpCode, total_obs), y = total_obs)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 20 Species by Observation Count",
+       x = "Species Code",
+       y = "Observations") +
+  theme_minimal()
+
+
+
+## Save as Excel and R Object
+
+install.packages("writexl")
+library(writexl)
+
+write_xlsx(dc_species_counts, "arc_dc_species_counts.xlsx")
+write_xlsx(top20, "arc_dc_top20_species.xlsx")
+
+
+saveRDS(dc_species_counts, "dc_species_counts.rds")
+saveRDS(top20, "dc_top20_species.rds")
+
+
+
+
+write_xlsx(dc_species_counts_with_scinames, "arc_dc_species_counts_scinames.xlsx")
+
+saveRDS(dc_species_counts_with_scinames, "dc_species_counts_scinames.rds")
+
+
+##
+
+
+library(dplyr)
+library(tidyr)
+
+species_year_presence <- arc_dc_trees %>%
+  distinct(SpCode, year) %>%   # one row per species-year combo
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from = year,
+    values_from = present,
+    values_fill = FALSE
+  )
+
+
+###Join Datasets
+
+
+
+setDT(arc_dc_trees)
+setDT(compiled_crown_ndvi_polygon_subset)
+
+arc_dc_trees[, UID := as.character(UID)]
+compiled_crown_ndvi_polygon_subset[, UID := as.character(UID)]
+
+
+tree_info <- arc_dc_trees[, .(
+  UID,
+  DBH,
+  SCI_NM,
+  SCI_mrg,
+  SpCode_arc = SpCode,     # keep separate name to compare
+  Genus,
+  origin,
+  native,
+  chm_ht,
+  Shape__Area
+)]
+
+
+## Combined Data Sets
+ndvi_with_treeinfo <- merge(
+  compiled_crown_ndvi_polygon_subset,
+  tree_info,
+  by = "UID",
+  all.x = TRUE
+)
+
+#missing matches
+ndvi_with_treeinfo[is.na(DBH), .N]
+#percent of matches
+ndvi_with_treeinfo[, mean(!is.na(DBH))] * 100
+
+
+###fixes dataset so that species_year_presence comes from the NDVI table, not arc_dc_trees
+
+
+library(data.table)
+setDT(ndvi_with_treeinfo)
+
+ndvi_with_treeinfo[, year := as.integer(substr(im_datetime, 1, 4))]
+
+names(ndvi_with_treeinfo)
+
+species_year_presence <- ndvi_with_treeinfo[
+  , .(present = TRUE),
+  by = .(SpCode = SpCode_arc, year)
+] |>
+  as.data.frame() |>
+  tidyr::pivot_wider(
+    names_from = year,
+    values_from = present,
+    values_fill = FALSE
+  )
+
+
+library(data.table)
+setDT(ndvi_with_treeinfo)
+
+ndvi_with_treeinfo[, year := as.integer(substr(im_datetime, 1, 4))]
+
+names(ndvi_with_treeinfo)
+
+
+
+
+ndvi_dbh10 <- ndvi_with_treeinfo[DBH >= 10]
+"year" %in% names(ndvi_dbh10)
+head(ndvi_dbh10[, .(im_datetime, year)])
+
+
+species_year_counts <- ndvi_dbh10[
+  , .N,
+  by = .(SpCode = SpCode_arc, year)
+][order(SpCode, year)]
+
+
+
+species_summary <- ndvi_dbh10[
+  , .(
+    total_obs = .N,
+    n_years = uniqueN(year)
+  ),
+  by = .(SpCode = SpCode_arc)
+][order(-total_obs)]
