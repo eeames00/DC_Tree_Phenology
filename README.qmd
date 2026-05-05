@@ -1,3 +1,16 @@
+---
+title: The DATA 793 Student GitHub Repository
+author: Emily Eames
+date: May 5th, 2025
+format:
+  gfm:
+    toc: true
+    number-sections: true
+  html:
+    toc: true
+    number-sections: true
+    embed-resources: true
+---
 
 # 🌳 Urban Tree Phenology & Climate Sensitivity Analysis - Washington D.C.
 
@@ -85,9 +98,3 @@ How do species characteristics (1) , local climate drivers (2) , and urban conte
 git clone https://github.com/26S-DATA-793-2/project-eeames00
 
 
-- The folder contains sub-folders with dummy files in them to support
-  typical project work.
-
-- If students are not using this folder, they shall create a README.md
-  file to describe how they are configuration managing their project
-  work.
