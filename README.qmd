@@ -33,21 +33,22 @@ The goal is to...
 
 How do species characteristics (1) , local climate drivers (2) , and urban context (3) influence the timing and duration of tree phenological events (e.g., green-up, peak greenness, senescence) across Washington, DC.
 
----
 
+
+---
 
 ## Key Datasets 
 
-- USDA Full Tree Dataset [USDA Tree Dataset](./USDA_tree_dataset.xlsx) 
-- NOAA Climate Daily Observation [NOAA_CDO] ((project_solution/noaa_cdo.xlsx)
-- NDVI Outputs [`compiles_ndvi_data.R`](./compiles_ndvi_data.R) — NDVI data compilation 
+- USDA Full Tree Dataset USDA Tree Dataset (project_solution/data)
+- NOAA Climate Daily Observation NOAA CDO Dataset (project solutions folder)
+- NDVI Outputs NDVI data compilation (project_solution/data)
 
 
 ## Key Outputs
 
--  Phenology Extraction [PhenoMetrics] (project_solution/analysis/PhenoMetrics)
--  Final DC Species Output [DC Specise] (project_solution/data/DC Species .xlsx)
--  rgression Results Table [Regression Results Table](regression_table.xlsx)
+-  Phenology Extraction PhenoMetrics (project_solution/analysis)
+-  Final DC Species Output DC Specise List (project_solution/data)
+-  rgression Results Table Regression Results Table
 
 ## Key Figures
 
@@ -91,4 +92,10 @@ How do species characteristics (1) , local climate drivers (2) , and urban conte
 ```bash
 git clone https://github.com/26S-DATA-793-2/project-eeames00
 
+
+- The folder contains sub-folders with dummy files in them to support
+  typical project work.
+
+- If students are not using this folder, they shall create a README.md
+  file to describe how they are configuration managing their project
 
