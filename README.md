@@ -26,9 +26,9 @@ How do species characteristics (1) , local climate drivers (2) , and urban conte
 
 ## Key Datasets 
 
-- USDA Full Tree Dataset [USDA Tree Dataset](./USDA_tree_dataset.xlsx) 
-- NOAA Climate Daily Observation [NOAA_CDO] ((project_solution/noaa_cdo.xlsx)
-- NDVI Outputs [`compiles_ndvi_data.R`](./compiles_ndvi_data.R) — NDVI data compilation 
+- USDA Full Tree Dataset USDA Tree Dataset (project solutions folder) 
+- NOAA Climate Daily Observation NOAA CDO Dataset (project solutions folder)
+- NDVI Outputs NDVI data compilation ((project solutions folder)_
 
 
 ## Key Outputs
