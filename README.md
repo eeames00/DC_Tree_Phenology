@@ -20,12 +20,7 @@ The goal is to...
 
 How do species characteristics (1) , local climate drivers (2) , and urban context (3) influence the timing and duration of tree phenological events (e.g., green-up, peak greenness, senescence) across Washington, DC.
 
----
 
-## Final Report & Presentation
- [View Full Report (HTML/PDF)](https://your-username.github.io/your-repo-name/)  
- [Download PDF](https://github.com/your-username/your-repo-name/blob/main/report/final_report.pdf)
- ***[View Final Presentation] ()
 
 ---
 
