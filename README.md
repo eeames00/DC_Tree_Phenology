@@ -26,15 +26,15 @@ How do species characteristics (1) , local climate drivers (2) , and urban conte
 
 ## Key Datasets 
 
-- USDA Full Tree Dataset USDA Tree Dataset (project solutions folder) 
+- USDA Full Tree Dataset USDA Tree Dataset (project_solution/data)
 - NOAA Climate Daily Observation NOAA CDO Dataset (project solutions folder)
-- NDVI Outputs NDVI data compilation ((project solutions folder)
+- NDVI Outputs NDVI data compilation (project_solution/data)
 
 
 ## Key Outputs
 
--  Phenology Extraction PhenoMetrics (project_solution/analysis/PhenoMetrics)
--  Final DC Species Output DC Specise List (project_solution/data/DC Species .xlsx)
+-  Phenology Extraction PhenoMetrics (project_solution/analysis)
+-  Final DC Species Output DC Specise List (project_solution/data)
 -  rgression Results Table Regression Results Table
 
 ## Key Figures
